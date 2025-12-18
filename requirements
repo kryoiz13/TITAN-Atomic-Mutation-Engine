@@ -1,0 +1,7 @@
+customtkinter
+opencv-python
+numpy
+pytesseract
+pillow
+keyboard
+pynput
