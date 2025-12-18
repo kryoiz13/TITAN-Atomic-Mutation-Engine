@@ -1,0 +1,223 @@
+# ==============================================================================
+#   TITAN v54: FULL RESTORATION + HYDRA-PICKUP + FLOOR LOGIC
+#   FIXES: FULL CODEBASE RESTORED | AGGRESSIVE PICKUP | COMPACT-WIDTH UI
+# ==============================================================================
+
+import customtkinter as ctk
+import threading, time, cv2, keyboard, re, random, os, ctypes, json
+import numpy as np
+from PIL import ImageGrab
+import pytesseract
+from pynput import mouse
+from datetime import datetime
+from tkinter import messagebox, Canvas, Toplevel
+
+# ------------------------------------------------------------------------------
+# [BYPASS] HIGH-FREQUENCY HARDWARE INJECTION
+# ------------------------------------------------------------------------------
+MOUSE_ABS = 0x8000 | 0x0001
+L_DOWN, L_UP = 0x0002, 0x0004
+CONFIG_FILE = "titan_v54_config.json"
+
+def hw_move(x, y):
+    nx = int(x * 65535 / ctypes.windll.user32.GetSystemMetrics(0))
+    ny = int(y * 65535 / ctypes.windll.user32.GetSystemMetrics(1))
+    ctypes.windll.user32.mouse_event(MOUSE_ABS, nx, ny, 0, 0)
+
+def hw_click(state):
+    ctypes.windll.user32.mouse_event(L_DOWN if state else L_UP, 0, 0, 0, 0)
+
+# ------------------------------------------------------------------------------
+# [ENGINE] THE HYDRA-GRAB (INDUSTRIAL GRADE)
+# ------------------------------------------------------------------------------
+class HydraEngine:
+    @staticmethod
+    def force_pickup(start, end):
+        """mimics a human 'grabbing' the item with high-frequency click bursts."""
+        hw_move(start[0], start[1])
+        time.sleep(0.06)
+        
+        # Click flurry to weld the treat to the cursor
+        for _ in range(6):
+            hw_move(start[0] + random.randint(-3, 3), start[1] + random.randint(-3, 3))
+            hw_click(True); time.sleep(0.01)
+            hw_click(False); time.sleep(0.01)
+        
+        hw_click(True) # Final lockdown hold
+        time.sleep(0.05)
+        
+        # Spiral Warp (Tension-based movement to bee)
+        steps = 12
+        for i in range(1, steps + 1):
+            t = i / steps
+            tx = int(start[0] + (end[0]-start[0])*t) + random.randint(-4, 4)
+            ty = int(start[1] + (end[1]-start[1])*t) + random.randint(-4, 4)
+            hw_move(tx, ty)
+            time.sleep(0.01)
+            
+        time.sleep(0.06)
+        hw_click(False)
+
+# ------------------------------------------------------------------------------
+# [UI] TITAN v54 FULL CHASSIS
+# ------------------------------------------------------------------------------
+class TitanV54(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("TITAN v54")
+        self.geometry("380x920") # Slimmer width, full height preserved
+        self.configure(fg_color="#000")
+        self.attributes("-topmost", True)
+        
+        self.running = False
+        self.paused = False
+        self.locs = {'treat': None, 'bee': None, 'yes': None}
+        self.roi = None
+        self.total_rolls = 0
+        
+        # TESSERACT PATH - CHANGE IF DIFFERENT
+        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+        
+        self._build_interface()
+        self.load_settings()
+        
+        keyboard.add_hotkey('f1', self.toggle)
+        keyboard.add_hotkey('f2', self.pause_toggle)
+        keyboard.add_hotkey('f3', lambda: os._exit(0))
+
+    def _build_interface(self):
+        # Header Area
+        self.header = ctk.CTkLabel(self, text="🐉 TITAN v54", font=("Impact", 36), text_color="#FFFF00")
+        self.header.pack(pady=(15, 5))
+        
+        self.stat_frame = ctk.CTkFrame(self, fg_color="#111", corner_radius=10)
+        self.stat_frame.pack(pady=5, padx=30, fill="x")
+        self.roll_lbl = ctk.CTkLabel(self.stat_frame, text="ROLLS: 0", font=("Consolas", 16, "bold"), text_color="#FFF")
+        self.roll_lbl.pack(pady=5)
+
+        # Mapping Buttons
+        for k in ['treat', 'bee', 'yes']:
+            btn = ctk.CTkButton(self, text=f"MAP {k.upper()}", height=35, fg_color="#1a1a1a", hover_color="#333", command=lambda x=k: self.map(x))
+            btn.pack(pady=3, padx=50, fill="x"); setattr(self, f"ui_{k}", btn)
+            
+        self.btn_roi = ctk.CTkButton(self, text="SELECT SCAN AREA", command=self.set_roi, fg_color="#1a1a1a")
+        self.btn_roi.pack(pady=8, padx=50, fill="x")
+
+        # Configuration
+        ctk.CTkLabel(self, text="TARGET MUTATION:", font=("Arial", 12)).pack(pady=(10, 0))
+        self.target_mut = ctk.CTkComboBox(self, values=["Attack", "Convert Amount", "Gather Amount", "Energy", "Ability Rate", "Critical Chance", "Instant Conversion", "Movespeed"], width=200)
+        self.target_mut.pack(pady=5); self.target_mut.set("Ability Rate")
+        
+        ctk.CTkLabel(self, text="MINIMUM % (FLOOR):", font=("Arial", 12)).pack(pady=(5, 0))
+        self.target_val = ctk.CTkEntry(self, placeholder_text="Minimum %", width=100)
+        self.target_val.pack(pady=5); self.target_val.insert(0, "2")
+
+        # Control Buttons
+        self.save_btn = ctk.CTkButton(self, text="💾 SAVE SETTINGS", height=35, fg_color="#004400", command=self.save_settings)
+        self.save_btn.pack(pady=10, padx=50, fill="x")
+
+        self.start_btn = ctk.CTkButton(self, text="ENGAGE (F1)", height=65, font=("Arial", 22, "bold"), fg_color="#FFFF00", text_color="#000", command=self.toggle)
+        self.start_btn.pack(pady=10, padx=50, fill="x")
+
+        # Logs
+        self.log_box = ctk.CTkTextbox(self, height=200, font=("Consolas", 11), fg_color="#050505", text_color="#00FF00")
+        self.log_box.pack(pady=5, padx=20, fill="x")
+
+    def log(self, m):
+        self.log_box.insert("end", f"[{datetime.now().strftime('%H:%M:%S')}] {m}\n")
+        self.log_box.see("end")
+
+    def save_settings(self):
+        data = {'locs': self.locs, 'roi': self.roi, 'target': self.target_mut.get(), 'val': self.target_val.get()}
+        with open(CONFIG_FILE, 'w') as f: json.dump(data, f)
+        self.log("CONFIG HARD-SAVED")
+
+    def load_settings(self):
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r') as f:
+                    d = json.load(f)
+                    self.locs = d['locs']; self.roi = d['roi']
+                    self.target_mut.set(d['target'])
+                    self.target_val.delete(0, 'end'); self.target_val.insert(0, d['val'])
+                    for k in ['treat', 'bee', 'yes']:
+                        if self.locs[k]: getattr(self, f"ui_{k}").configure(fg_color="#003300", text=f"{k.upper()} CACHED")
+                    self.log("SETTINGS RESTORED")
+            except: self.log("LOAD ERROR")
+
+    def pause_toggle(self):
+        self.paused = not self.paused
+        self.log("PAUSED" if self.paused else "RESUMED")
+
+    def map(self, k):
+        messagebox.showinfo("Config", f"Right-click {k} position.")
+        def on_click(x, y, btn, pr):
+            if btn == mouse.Button.right and pr:
+                self.locs[k] = (x, y); self.save_settings()
+                getattr(self, f"ui_{k}").configure(fg_color="#003300", text=f"{k.upper()} LOCKED")
+                return False
+        mouse.Listener(on_click=on_click).start()
+
+    def set_roi(self):
+        win = Toplevel(); win.attributes("-alpha", 0.3, "-fullscreen", True)
+        can = Canvas(win, cursor="cross", bg="grey"); can.pack(fill="both", expand=True)
+        def st(e): self.sx, self.sy = e.x, e.y; self.rect = can.create_rectangle(e.x, e.y, 1, 1, outline='yellow', width=3)
+        def dr(e): can.coords(self.rect, self.sx, self.sy, e.x, e.y)
+        def en(e): self.roi = (self.sx, self.sy, e.x, e.y); win.destroy(); self.log("AREA SET")
+        can.bind("<Button-1>", st); can.bind("<B1-Motion>", dr); can.bind("<ButtonRelease-1>", en)
+
+    def toggle(self):
+        self.running = not self.running
+        if self.running: 
+            self.log("SYSTEM ACTIVE")
+            threading.Thread(target=self.run_logic, daemon=True).start()
+        else: self.log("SYSTEM HALTED")
+
+    def run_logic(self):
+        while self.running:
+            if self.paused: time.sleep(0.5); continue
+            
+            # 1. THE HYDRA PICKUP
+            HydraEngine.force_pickup(self.locs['treat'], self.locs['bee'])
+            self.total_rolls += 1
+            self.roll_lbl.configure(text=f"ROLLS: {self.total_rolls}")
+            
+            # 2. THE YES HAMMER
+            time.sleep(0.35)
+            for _ in range(8):
+                hw_move(self.locs['yes'][0] + random.randint(-1, 1), self.locs['yes'][1] + random.randint(-1, 1))
+                hw_click(True); time.sleep(0.01); hw_click(False)
+
+            # 3. DEEP OCR (FULL STRING + FLOOR CHECK)
+            time.sleep(1.8)
+            try:
+                cap = np.array(ImageGrab.grab(bbox=self.roi))
+                hsv = cv2.cvtColor(cap, cv2.COLOR_RGB2HSV)
+                mask = cv2.inRange(hsv, np.array([20, 100, 100]), np.array([35, 255, 255]))
+                mask = cv2.bitwise_not(mask)
+                upscaled = cv2.resize(mask, None, fx=2, fy=2, interpolation=cv2.INTER_LINEAR)
+                
+                text = pytesseract.image_to_string(upscaled, config='--psm 6').lower()
+                self.log(f"READ: {text.strip()}")
+
+                match = re.search(r'(\d+)%', text)
+                if match:
+                    detected_val = int(match.group(1))
+                    target_floor = int(self.target_val.get())
+                    target_type = self.target_mut.get().lower()
+
+                    if target_type in text:
+                        # FLOOR CHECK: Stops at target OR higher
+                        if detected_val >= target_floor:
+                            self.log("!!! GOAL REACHED !!!")
+                            messagebox.showinfo("TITAN", f"FOUND: {text.strip()}")
+                            self.running = False; break
+                        else:
+                            self.log(f"Roll {detected_val}% < {target_floor}%... skipping")
+            except Exception as e:
+                self.log(f"Vision error: {e}")
+            
+            time.sleep(0.5)
+
+if __name__ == "__main__":
+    TitanV54().mainloop()
